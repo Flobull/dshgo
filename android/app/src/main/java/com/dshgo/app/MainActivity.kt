@@ -206,6 +206,16 @@ class MainActivity : androidx.fragment.app.FragmentActivity() {
     private var filePathCallback: ValueCallback<Array<Uri>>? = null
 
     /**
+     * 主框架 401 之后自动重握手的次数，限两次。
+     *
+     * 电脑上的 dsh web 一重启，launch token 就换了，手机里那份 `dsh-auth-*` 立刻作废。
+     * 这时页面只会显示一张「登录凭据失效」的遮罩，用户唯一的出路是去设置里清除缓存
+     * （把 cookie 一起删掉），下一次导航才会重新换票。现在拿到 401 直接重握手一次，
+     * 用不着用户自己动手；限两次是防止上游一直 401 时打转。
+     */
+    private var autoReloginCount = 0
+
+    /**
      * 从通知点进来、但页面还没载入完时先存着，等 onPageFinished 再应用。
      * 冷启动点通知会走这条路径。
      */
@@ -608,6 +618,7 @@ class MainActivity : androidx.fragment.app.FragmentActivity() {
                 // 加载失败时**不能**把 dshReady 置回 true —— Chrome 对错误页
                 // 同样会调 onPageFinished，置回去会把失败界面撤掉、露出原生错误页。
                 if (ui.screen == Screen.Dsh && ui.pageError == null) {
+                    autoReloginCount = 0
                     ui = ui.copy(dshReady = true, dshError = null)
                 }
             }
@@ -637,6 +648,17 @@ class MainActivity : androidx.fragment.app.FragmentActivity() {
                 if (view !== webView) return   // 同上：别把另一条连接的错误显示在这边
                 if (!req.isForMainFrame || res.statusCode < 400) return
                 clearLoadTimeout()
+
+                // 401：多半是电脑上的 dsh web 重启了（launch token 变了，旧会话 cookie 失效）。
+                // 直接重握手换一份 cookie，省得用户去「清除缓存」。
+                if (res.statusCode == 401 && ui.screen == Screen.Dsh && autoReloginCount < 2) {
+                    autoReloginCount += 1
+                    Log.i("dshgo-auth", "主框架 401，自动重握手（第 $autoReloginCount 次）")
+                    ui = ui.copy(pageError = null, dshReady = false, dshError = null)
+                    reloadDsh()
+                    return
+                }
+
                 if (ui.screen == Screen.Dsh) {
                     ui = ui.copy(pageError = "HTTP ${res.statusCode}")
                     ui = ui.copy(
